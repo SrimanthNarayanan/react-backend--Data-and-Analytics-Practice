@@ -19,3 +19,5 @@ bcrypt
 reportlab
 pyarrow
 python-dotenv
+setuptools
+
