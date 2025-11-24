@@ -20,4 +20,5 @@ reportlab
 pyarrow
 python-dotenv
 setuptools
+gunicorn==21.2.0
 
