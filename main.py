@@ -28,18 +28,28 @@ from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from ydata_profiling import ProfileReport
 import uuid
-import sys
-import traceback
 # --- ADDED FROM main1.py (though not used in catalog, good to have if you expand) ---
 from cryptography.fernet import Fernet
+from werkzeug.middleware.proxy_fix import ProxyFix
 
-key = Fernet.generate_key()
+encryption_key_str = os.environ.get('ENCRYPTION_KEY')
+if not encryption_key_str:
+    print("WARNING: 'ENCRYPTION_KEY' not found in .env. Generating a temporary key.")
+    key = Fernet.generate_key()
+else:
+    key = encryption_key_str.encode()
 cipher = Fernet(key)
 
 app = Flask(__name__)
-# --- SECRET KEY IMPROVEMENT ---
-# Fail fast if the secret key is not set in production
-app.secret_key = os.environ.get('SECRET_KEY','$2b$12$0Jk75xSGIWeEgIwuPp1tKu.DwVPwLF/bbv1p8ZIugc/iUlk4S7jFa')
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
+app.config.update(
+    SESSION_COOKIE_SECURE=True, 
+    SESSION_COOKIE_SAMESITE='None',
+    SESSION_COOKIE_HTTPONLY=True,
+)
+
+app.secret_key = os.environ.get('SECRET_KEY')
 if not app.secret_key:
     if app.debug:
         print("Warning: SECRET_KEY not set, using default. DO NOT use in production.")
@@ -47,7 +57,7 @@ if not app.secret_key:
     else:
         raise ValueError("SECRET_KEY environment variable is not set. App cannot run.")
 
-CORS(app, supports_credentials=True)
+CORS(app, supports_credentials=True, origins=["http://localhost:3000", "https://Praveen-R-22.github.io"])
 
 REPORTS_DIR = "reports"
 os.makedirs(REPORTS_DIR, exist_ok=True)
@@ -116,7 +126,7 @@ def init_db_snowflake():
                 # Use .execute() safely with f-strings for non-user-input
                 cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS {SNOWFLAKE_SCHEMA}.chat_sessions (
-                        id INT AUTOINCREMENT NOT NULL,
+                        id INT AUTOINCREMENT START 1 INCREMENT 1 NOT NULL,
                         user_id STRING NOT NULL,
                         created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP,
                         CONSTRAINT chat_sessions_pkey PRIMARY KEY (id),
@@ -126,7 +136,7 @@ def init_db_snowflake():
                 
                 cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS {SNOWFLAKE_SCHEMA}.messages (
-                        id INT AUTOINCREMENT NOT NULL,
+                        id INT AUTOINCREMENT START 1 INCREMENT 1 NOT NULL,
                         session_id INT NULL,
                         sender VARCHAR(10) NOT NULL,
                         text STRING NOT NULL,
@@ -138,7 +148,7 @@ def init_db_snowflake():
 
                 cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS {SNOWFLAKE_SCHEMA}.qa_pairs (
-                        id INT AUTOINCREMENT NOT NULL,
+                        id INT AUTOINCREMENT START 1 INCREMENT 1 NOT NULL,
                         session_id INT NULL,
                         question STRING NOT NULL,
                         answer STRING NULL,
@@ -151,7 +161,7 @@ def init_db_snowflake():
                 
                 cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS {SNOWFLAKE_SCHEMA}.users (
-                        id INT AUTOINCREMENT NOT NULL,
+                        id INT AUTOINCREMENT START 1 INCREMENT 1 NOT NULL,
                         username VARCHAR(50) NOT NULL,
                         email VARCHAR(100) NOT NULL,
                         password_hash VARCHAR(255) NOT NULL,
@@ -208,7 +218,7 @@ def init_db_snowflake():
                 
                 cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS {SNOWFLAKE_SCHEMA}.saved_connections (
-                        id INT AUTOINCREMENT NOT NULL,
+                        id INT AUTOINCREMENT START 1 INCREMENT 1 NOT NULL,
                         username VARCHAR(50) NOT NULL,
                         nickname VARCHAR(100) NOT NULL,
                         db_type VARCHAR(50) NOT NULL,
@@ -229,7 +239,7 @@ def init_db_snowflake():
                 # --- THIS DDL IS NOW CORRECT and matches the INSERT statement ---
                 cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS {SNOWFLAKE_SCHEMA}.semantic_catalogs (
-                        id INTEGER AUTOINCREMENT,
+                        id INTEGER AUTOINCREMENT START 1 INCREMENT 1,
                         username VARCHAR(50) NOT NULL,
                         catalog_name VARCHAR(100) NOT NULL,
                         db_type VARCHAR(50) NOT NULL,
@@ -249,7 +259,7 @@ def init_db_snowflake():
 
                 cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS {SNOWFLAKE_SCHEMA}.semantic_catalogs_detail (
-                        id INTEGER AUTOINCREMENT,
+                        id INTEGER AUTOINCREMENT START 1 INCREMENT 1,
                         catalog_id INTEGER,
                         schema_name VARCHAR(200), -- Added schema_name from main1.py logic
                         table_name VARCHAR(200) NOT NULL,
@@ -263,6 +273,25 @@ def init_db_snowflake():
                             REFERENCES {SNOWFLAKE_SCHEMA}.semantic_catalogs(id) ON DELETE CASCADE
                     );
                 """)
+
+                cur.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {SNOWFLAKE_SCHEMA}.user_catalogs (
+                        user_id INT NOT NULL,
+                        catalog_id INT NOT NULL,
+                        assigned_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP,
+                        CONSTRAINT user_catalogs_pkey PRIMARY KEY (user_id, catalog_id)
+                    );
+                """)
+                cur.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {SNOWFLAKE_SCHEMA}.user_preferences (
+                        username VARCHAR(50) NOT NULL,
+                        preferences_data VARIANT,
+                        updated_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP,
+                        CONSTRAINT user_preferences_pkey PRIMARY KEY (username),
+                        CONSTRAINT user_preferences_user_fkey FOREIGN KEY (username) 
+                            REFERENCES {SNOWFLAKE_SCHEMA}.users(username) ON DELETE CASCADE
+                    );
+                """)                
                 # --- END NEW DDLs ---
                 
             print("Snowflake database, schema, and tables checked/initialized.")
@@ -1479,10 +1508,14 @@ def get_users():
         with get_db_conn_configured() as conn: # Use new connection
             with conn.cursor(snowflake.connector.DictCursor) as cur:
                 cur.execute(f'SELECT id, username, email, role FROM {SNOWFLAKE_SCHEMA}.users ORDER BY id ASC')
-                users = [
-                    {"id": r["ID"], "username": r["USERNAME"], "email": r["EMAIL"], "role": r["ROLE"]}
-                    for r in cur.fetchall()
-                ]
+                # Convert to dict to allow modification
+                users = [dict(r) for r in cur.fetchall()]
+                
+                # --- NEW: Fetch assigned catalogs for each user ---
+                for user in users:
+                    cur.execute(f"SELECT catalog_id FROM {SNOWFLAKE_SCHEMA}.user_catalogs WHERE user_id = %s", (user['ID'],))
+                    user['assigned_catalogs'] = [row['CATALOG_ID'] for row in cur.fetchall()]
+                
         return jsonify({"success": True, "users": users})
     except Exception as e:
         print(f"Error fetching users: {e}")
@@ -1495,6 +1528,8 @@ def create_user():
     password = data.get('password')
     email = data.get('email')
     role = data.get('role', 'user')
+    # --- NEW: Capture assigned catalogs ---
+    assigned_catalogs = data.get('assigned_catalogs', [])
 
     if not all([username, password, email]):
         return jsonify({"success": False, "error": "Missing required fields"}), 400
@@ -1504,11 +1539,21 @@ def create_user():
         
         with get_db_conn_configured() as conn: # Use new connection
             with conn.cursor() as cur:
-                # --- SQL INJECTION FIX: Use parameterized query ---
+                # Insert User
                 cur.execute(
                     f'INSERT INTO {SNOWFLAKE_SCHEMA}.users (username, password_hash, email, role) VALUES (%s, %s, %s, %s)',
                     (username, hashed_pw.decode('utf-8'), email, role)
                 )
+                
+                # --- NEW: Handle Catalog Assignments ---
+                if assigned_catalogs:
+                    # Fetch the ID of the newly created user
+                    cur.execute(f"SELECT id FROM {SNOWFLAKE_SCHEMA}.users WHERE username = %s", (username,))
+                    user_id = cur.fetchone()[0]
+                    
+                    for cat_id in assigned_catalogs:
+                        cur.execute(f"INSERT INTO {SNOWFLAKE_SCHEMA}.user_catalogs (user_id, catalog_id) VALUES (%s, %s)", (user_id, cat_id))
+                # ---------------------------------------
                 conn.commit()
         
         return jsonify({"success": True, "message": "User created successfully"}), 201
@@ -1531,11 +1576,10 @@ def update_password():
     try:
         hashed_pw = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
         
-        with get_db_conn_configured() as conn: # Use new connection
+        with get_db_conn_configured() as conn:
             with conn.cursor() as cur:
-                # --- SQL INJECTION FIX: Use parameterized query ---
                 cur.execute(
-                    f'UPDATE {SNOWFLAKE_SCHEMA}.users SET password_hash = %s WHERE username = %s',
+                    f'UPDATE {SNOWFLAKE_SCHEMA}.users SET password_hash = %s, updated_at = CURRENT_TIMESTAMP WHERE username = %s',
                     (hashed_pw.decode('utf-8'), username)
                 )
                 conn.commit()
@@ -1881,66 +1925,62 @@ def delete_connection():
 
 # --- NEW: Semantic Catalog Endpoints (Ported from main1.py) ---
 @app.route('/api/semantic_catalogs', methods=['GET'])
-def get_semantic_catalogs():
+def get_catalog():
     if 'user' not in session:
         return jsonify({"error": "Not authenticated"}), 401
+    
+    current_username = session.get('user') # Get the logged-in username
 
     try:
         with get_db_conn_configured() as conn:
             with conn.cursor(snowflake.connector.DictCursor) as cur:
-                # Get catalogs for the current user only
-                cur.execute(f"""
+                # --- MODIFIED QUERY: Filter by Owner OR Assigned User ---
+                query = f"""
                     SELECT 
                         a.id,
-                        a.catalog_name,
-                        COUNT(DISTINCT b.table_name) AS table_count
+                        a.catalog_name AS semantic_catalog_name,
+                        COUNT(DISTINCT b.table_name) AS nooftables,
+                        LISTAGG(DISTINCT b.table_name, ', ') WITHIN GROUP (ORDER BY b.table_name) AS table_name
                     FROM 
                         {SNOWFLAKE_SCHEMA}.semantic_catalogs a
                     LEFT JOIN 
                         {SNOWFLAKE_SCHEMA}.semantic_catalogs_detail b ON a.id = b.catalog_id
-                    WHERE a.username = %s
+                    WHERE 
+                        -- 1. User is the Owner
+                        a.username = %s
+                        OR 
+                        -- 2. User is explicitly assigned (join with user_catalogs and users)
+                        a.id IN (
+                            SELECT uc.catalog_id 
+                            FROM {SNOWFLAKE_SCHEMA}.user_catalogs uc
+                            JOIN {SNOWFLAKE_SCHEMA}.users u ON uc.user_id = u.id
+                            WHERE u.username = %s
+                        )
                     GROUP BY 
                         a.id, a.catalog_name
-                    ORDER BY a.catalog_name
-                """, (session.get('user'),))
+                """
+                
+                # Pass current_username twice: once for the owner check, once for the assignment check
+                cur.execute(query, (current_username, current_username))
                 
                 catalogs = [
                     {
                         "id": r["ID"],
-                        "catalog_name": r["CATALOG_NAME"],
-                        "table_count": r["TABLE_COUNT"]
+                        "semantic_catalog_name": r["SEMANTIC_CATALOG_NAME"],
+                        "NoofTables": r["NOOFTABLES"],
+                        "table_name": r["TABLE_NAME"]
                     }
                     for r in cur.fetchall()
                 ]
-        
-        return jsonify({"success": True, "catalogs": catalogs})
-        
+        return jsonify({"success": True, "catalog": catalogs})
     except Exception as e:
         print(f"Error fetching semantic catalogs: {e}")
         return jsonify({"success": False, "error": "Database error"}), 500
-
-def validate_catalog_ownership(catalog_id, username):
-    """Validate that the user owns the catalog before allowing operations"""
-    try:
-        with get_db_conn_configured() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT id FROM {SNOWFLAKE_SCHEMA}.semantic_catalogs WHERE id = %s AND username = %s",
-                    (catalog_id, username)
-                )
-                return cur.fetchone() is not None
-    except Exception as e:
-        print(f"Error validating catalog ownership: {e}")
-        return False
 
 @app.route("/api/semantic_catalogs/<int:catalog_id>/details", methods=["GET"])
 def catalog_details(catalog_id):
     if 'user' not in session:
         return jsonify({"error": "Not authenticated"}), 401
-    
-    # ADD THIS SECURITY CHECK:
-    if not validate_catalog_ownership(catalog_id, session.get('user')):
-        return jsonify({"success": False, "error": "Catalog not found or access denied"}), 404
 
     group_by_table = request.args.get("group_by_table", "false").lower() in ("1", "true", "yes")
     
@@ -2037,21 +2077,46 @@ def catalog_details(catalog_id):
         print(f"Failed to fetch catalog details for id={catalog_id}: {e}")
         return jsonify({"success": False, "error": "Failed to fetch catalog details"}), 500
 
+@app.route('/api/semantic_catalogs/list_all', methods=['GET'])
+def list_all_catalogs():
+    if 'user' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    try:
+        with get_db_conn_configured() as conn:
+            with conn.cursor(snowflake.connector.DictCursor) as cur:
+                # Fetch IDs and Names of all catalogs
+                cur.execute(f"SELECT id, catalog_name FROM {SNOWFLAKE_SCHEMA}.semantic_catalogs ORDER BY catalog_name")
+                
+                # Format specifically for the UserManagement dropdown
+                # The frontend expects keys: "id" and "name"
+                catalogs = [
+                    {"id": r["ID"], "name": r["CATALOG_NAME"]} 
+                    for r in cur.fetchall()
+                ]
+        return jsonify({"success": True, "catalogs": catalogs})
+    except Exception as e:
+        print(f"Error fetching all catalogs: {e}")
+        return jsonify({"success": False, "error": "Database error"}), 500
+
 @app.route('/api/semantic_catalogs/create_or_merge', methods=['POST'])
 def create_or_merge_sc():
     if 'user' not in session:
         return jsonify({"error": "Not authenticated"}), 401
 
     data = request.json or {}
-    print("=== CREATE_OR_MERGE_SC REQUEST DATA ===")
-    print("Full request data:", data)
-    
     conn_info = data.get('connectionInfo', {})
-    password = data.get('password')  # Get password from root level
     
-    print("Connection info:", conn_info)
-    print("Password provided:", "YES" if password else "NO")
-    
+    # --- ENCRYPTION LOGIC ---
+    try:
+        password = conn_info.get('password', '')
+        # Encrypt password if present
+        password_hash = cipher.encrypt(password.encode()).decode() if password else ""
+    except Exception as e:
+        print(f"Could not encrypt password: {e}")
+        password_hash = "" 
+    # ------------------------
+
     db_type = conn_info.get('db_type')
     host = conn_info.get('host')
     port = conn_info.get('port')
@@ -2060,50 +2125,16 @@ def create_or_merge_sc():
     schema = data.get('schema')
     
     appusername = session.get('user')
-    comments = data.get('comments', [])
-    
-    # Debug print all required fields
-    print("Required fields check:")
-    print(f"db_type: {db_type}")
-    print(f"host: {host}") 
-    print(f"user: {user}")
-    print(f"password: {'PROVIDED' if password else 'MISSING'}")
-    print(f"dbname: {dbname}")
-    print(f"schema: {schema}")
-
-    # Validate required inputs with better error messages
-    missing_fields = []
-    if not db_type: missing_fields.append("db_type")
-    if not host: missing_fields.append("host") 
-    if not user: missing_fields.append("user")
-    if not password: missing_fields.append("password")
-    if not dbname: missing_fields.append("dbname")
-    if not schema: missing_fields.append("schema")
-    
-    if missing_fields:
-        error_msg = f"Missing required parameters: {', '.join(missing_fields)}"
-        print(f"Validation failed: {error_msg}")
-        return jsonify({"success": False, "error": error_msg}), 400
-    
-    # Encrypt the password for storage
-    try:
-        password_hash = cipher.encrypt(password.encode()).decode()
-        print("Password encrypted successfully")
-    except Exception as e:
-        print(f"Could not encrypt password: {e}")
-        password_hash = ""
+    comments = data.get('comments', []) 
 
     scdetail = data.get('semanticdata', {})
     new_sc_name = scdetail.get('newCatalogName')
     old_sc_id = scdetail.get('existingCatalogId')
 
     try:
-        if not new_sc_name and not old_sc_id:
-             return jsonify({"success": False, "error": "Either newCatalogName or existingCatalogId must be provided"}), 400
+        if not all([db_type, host, user, dbname, schema]):
+            return jsonify({"success": False, "error": "Missing required connection parameters"}), 400
         
-        if not comments or not isinstance(comments, list):
-             return jsonify({"success": False, "error": "comments must be a non-empty list"}), 400
-
         with get_db_conn_configured() as conn:
             with conn.cursor() as cursor:
                 
@@ -2112,113 +2143,48 @@ def create_or_merge_sc():
                 
                 if new_sc_name:
                     catalog_name_to_return = new_sc_name
-                    print(f"Creating new catalog: {new_sc_name}")
-                    
-                    # Insert new catalog
                     cursor.execute(
                         f"""
                         INSERT INTO {SNOWFLAKE_SCHEMA}.semantic_catalogs 
                         (username, catalog_name, db_type, db_host, db_port, db_username, db_password_hash, db_dbname, db_schema)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
-                        (
-                            appusername or 'unknown_user',
-                            new_sc_name,
-                            db_type,
-                            host,
-                            str(port or ''),
-                            user,
-                            password_hash,
-                            dbname,
-                            schema
-                        )
+                        (appusername or 'unknown_user', new_sc_name, db_type, host, str(port or ''), user, password_hash, dbname, schema)
                     )
-                    
-                    # Get the newly created catalog ID
-                    cursor.execute(f"SELECT LAST_INSERT_ID()")
-                    result = cursor.fetchone()
-                    if result and result[0]:
-                        catalog_id = result[0]
-                        print(f"Got catalog ID from LAST_INSERT_ID(): {catalog_id}")
-                    else:
-                        # Fallback: query for the catalog we just created
-                        cursor.execute(
-                            f"SELECT id FROM {SNOWFLAKE_SCHEMA}.semantic_catalogs WHERE username = %s AND catalog_name = %s ORDER BY created_at DESC LIMIT 1",
-                            (appusername, new_sc_name)
-                        )
-                        result = cursor.fetchone()
-                        if result:
-                            catalog_id = result[0]
-                            print(f"Got catalog ID from query: {catalog_id}")
-                        else:
-                            raise Exception("Failed to retrieve catalog ID after creation")
-                        
+                    # Snowflake specific: get last ID
+                    cursor.execute(f"SELECT MAX(id) FROM {SNOWFLAKE_SCHEMA}.semantic_catalogs WHERE catalog_name = %s", (new_sc_name,))
+                    catalog_id = cursor.fetchone()[0]
                 else:
                     catalog_id = old_sc_id
-                    # Get the name for the response
                     cursor.execute(f"SELECT catalog_name FROM {SNOWFLAKE_SCHEMA}.semantic_catalogs WHERE id = %s", (catalog_id,))
-                    catalog_name_result = cursor.fetchone()
-                    catalog_name_to_return = catalog_name_result[0] if catalog_name_result else "Unknown Catalog"
-                    print(f"Merging into existing catalog: {catalog_name_to_return} (ID: {catalog_id})")
+                    res = cursor.fetchone()
+                    catalog_name_to_return = res[0] if res else "Unknown"
 
-                if not catalog_id:
-                     raise Exception("Failed to create or find catalog ID")
+                if not catalog_id: raise Exception("Failed to create or find catalog ID")
 
-                # Prepare comments data for insertion
-                comments_data_to_insert = [
-                    (catalog_id, schema, comment.get('table'), comment.get('column'), comment.get('type'), comment.get('description')) 
-                    for comment in comments
-                    if comment.get('table') and comment.get('column') and comment.get('description') is not None
-                ]
-
-                print(f"Prepared {len(comments_data_to_insert)} comments for insertion")
-
-                if not comments_data_to_insert:
-                    return jsonify({"success": False, "error": "No valid comment entries to insert"}), 400
+                # Prepare MERGE data
+                cursor.execute(f"CREATE TEMPORARY TABLE {SNOWFLAKE_SCHEMA}.merge_temp (catalog_id INT, schema_name VARCHAR, table_name VARCHAR, column_name VARCHAR, data_type VARCHAR, description VARCHAR)")
                 
-                # Use direct MERGE without temp table
-                if comments_data_to_insert:
-                    # Build the MERGE statement with VALUES
-                    placeholders = []
-                    params = []
-                    for item in comments_data_to_insert:
-                        placeholders.append("(%s, %s, %s, %s, %s, %s)")
-                        params.extend(item)
+                comments_data = [(catalog_id, schema, c.get('table'), c.get('column'), c.get('type'), c.get('description')) for c in comments if c.get('table')]
+                
+                if comments_data:
+                    cursor.executemany(f"INSERT INTO {SNOWFLAKE_SCHEMA}.merge_temp VALUES (%s, %s, %s, %s, %s, %s)", comments_data)
                     
-                    merge_sql = f"""
+                    cursor.execute(f"""
                         MERGE INTO {SNOWFLAKE_SCHEMA}.semantic_catalogs_detail AS T
-                        USING (VALUES {','.join(placeholders)}) 
-                        AS S(catalog_id, schema_name, table_name, column_name, data_type, description)
-                        ON T.catalog_id = S.catalog_id
-                        AND T.schema_name = S.schema_name
-                        AND T.table_name = S.table_name
-                        AND T.column_name = S.column_name
-                        WHEN MATCHED THEN
-                            UPDATE SET
-                                T.data_type = S.data_type,
-                                T.description = S.description,
-                                T.updated_at = CURRENT_TIMESTAMP()
-                        WHEN NOT MATCHED THEN
-                            INSERT (catalog_id, schema_name, table_name, column_name, data_type, description, created_at, updated_at)
-                            VALUES (S.catalog_id, S.schema_name, S.table_name, S.column_name, S.data_type, S.description, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())
-                    """
-                    cursor.execute(merge_sql, params)
-                    print(f"Successfully merged {len(comments_data_to_insert)} comments")
+                        USING {SNOWFLAKE_SCHEMA}.merge_temp AS S
+                        ON  T.catalog_id = S.catalog_id AND T.table_name = S.table_name AND T.column_name = S.column_name
+                        WHEN MATCHED THEN UPDATE SET T.data_type = S.data_type, T.description = S.description, T.updated_at = CURRENT_TIMESTAMP()
+                        WHEN NOT MATCHED THEN INSERT (catalog_id, schema_name, table_name, column_name, data_type, description)
+                        VALUES (S.catalog_id, S.schema_name, S.table_name, S.column_name, S.data_type, S.description)
+                    """)
 
                 conn.commit()
-                print("Transaction committed successfully")
         
-        return jsonify({
-            "success": True, 
-            "catalog_id": catalog_id, 
-            "catalog_name": catalog_name_to_return, 
-            "message": f"Successfully merged {len(comments_data_to_insert)} entries."
-        })
+        return jsonify({"success": True, "catalog_id": catalog_id, "catalog_name": catalog_name_to_return, "message": "Merged successfully."})
 
     except Exception as e:
-        print(f"Error in create_or_merge_sc: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 # --- END NEW Semantic Catalog Endpoints ---
@@ -2852,7 +2818,7 @@ def update_column_comments():
             if db_type == "PostgreSQL":
                 sql = f'COMMENT ON COLUMN "{schema}"."{table}"."{col_name}" IS %s;'
             elif db_type == "Oracle":
-                sql = f'COMMENT ON COLUMN "{schema.upper()}".""{table.upper()}"."{col_name.upper()}" IS :1'
+                sql = f'COMMENT ON COLUMN "{schema.upper()}"."{table.upper()}"."{col_name.upper()}" IS :1'
             elif db_type == "Snowflake":
                 sql = f'COMMENT ON COLUMN "{dbname}"."{schema}"."{table}"."{col_name}" IS %s'
             
@@ -2919,6 +2885,77 @@ def generate_profiling_report():
         print(f"Error generating profiling report: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route('/api/user/preferences', methods=['GET'])
+def get_user_preferences():
+    username = session.get('user')
+    if not username:
+        return jsonify({"error": "Not authenticated"}), 401
+    
+    try:
+        with get_db_conn_configured() as conn:
+            with conn.cursor(snowflake.connector.DictCursor) as cur:
+                # Retrieve the JSON data directly
+                cur.execute(
+                    f"SELECT preferences_data FROM {SNOWFLAKE_SCHEMA}.user_preferences WHERE username = %s", 
+                    (username,)
+                )
+                row = cur.fetchone()
+                
+                if row and row['PREFERENCES_DATA']:
+                    # Snowflake connector usually returns VARIANT as a Python dict/list string, 
+                    # or a native object depending on version. We ensure it's returned as JSON.
+                    prefs = row['PREFERENCES_DATA']
+                    
+                    # If it comes back as a JSON string, parse it. If it's already a dict, use it.
+                    if isinstance(prefs, str):
+                        try:
+                            prefs = json.loads(prefs)
+                        except:
+                            prefs = {} 
+                            
+                    return jsonify({"success": True, "preferences": prefs})
+                else:
+                    # Return empty structure if no preferences saved yet
+                    return jsonify({"success": True, "preferences": { 
+                        "pinned_items": [], 
+                        "pinned_dashboards": [] 
+                    }})
+
+    except Exception as e:
+        print(f"Error fetching preferences: {e}")
+        return jsonify({"success": False, "error": "Database error fetching preferences"}), 500
+
+
+@app.route('/api/user/preferences', methods=['POST'])
+def save_user_preferences():
+    username = session.get('user')
+    if not username:
+        return jsonify({"error": "Not authenticated"}), 401
+        
+    data = request.json # Expecting { pinned_items: [...], pinned_dashboards: [...] }
+    
+    try:
+        # Prepare data for Snowflake VARIANT column
+        json_data = json.dumps(data)
+
+        with get_db_conn_configured() as conn:
+            with conn.cursor() as cur:
+                # Use MERGE to Insert (if new) or Update (if exists)
+                cur.execute(f"""
+                    MERGE INTO {SNOWFLAKE_SCHEMA}.user_preferences AS target
+                    USING (SELECT %s AS username, PARSE_JSON(%s) AS preferences_data) AS source
+                    ON target.username = source.username
+                    WHEN MATCHED THEN
+                        UPDATE SET preferences_data = source.preferences_data, updated_at = CURRENT_TIMESTAMP
+                    WHEN NOT MATCHED THEN
+                        INSERT (username, preferences_data) VALUES (source.username, source.preferences_data)
+                """, (username, json_data))
+                conn.commit()
+                
+        return jsonify({"success": True, "message": "Preferences saved successfully"})
+    except Exception as e:
+        print(f"Error saving preferences: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/generate_db_profiling_report', methods=['POST'])
 def generate_db_profiling_report():
