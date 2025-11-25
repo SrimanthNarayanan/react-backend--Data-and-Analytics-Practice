@@ -57,7 +57,7 @@ if not app.secret_key:
     else:
         raise ValueError("SECRET_KEY environment variable is not set. App cannot run.")
 
-CORS(app, supports_credentials=True, origins=["http://localhost:3000", "https://Praveen-R-22.github.io"])
+CORS(app, supports_credentials=True, origins=["http://localhost:3000", "https://Praveen-R-22.github.io","http://localhost:5000"])
 
 REPORTS_DIR = "reports"
 os.makedirs(REPORTS_DIR, exist_ok=True)
@@ -66,7 +66,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     print("Warning: GEMINI_API_KEY environment variable not set.")
 # --- Use f-string safely as key is loaded from env ---
-GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
 
 # --- Snowflake App Backend Connection Details ---
 SNOWFLAKE_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA", "ANALYTICSBOT")
@@ -3070,3 +3070,4 @@ def get_report(filename):
 
 if __name__ == '__main__':
     app.run(debug=True)
+
