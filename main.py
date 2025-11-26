@@ -57,7 +57,7 @@ if not app.secret_key:
     else:
         raise ValueError("SECRET_KEY environment variable is not set. App cannot run.")
 
-CORS(app, supports_credentials=True, origins=["http://localhost:3000", "https://Praveen-R-22.github.io","http://localhost:5000"])
+CORS(app, supports_credentials=True, origins=["http://localhost:3000", "https://Praveen-R-22.github.io","http://localhost:5000","https://analytix-hub-technologies-pvt-ltd.github.io"])
 
 REPORTS_DIR = "reports"
 os.makedirs(REPORTS_DIR, exist_ok=True)
@@ -3070,4 +3070,5 @@ def get_report(filename):
 
 if __name__ == '__main__':
     app.run(debug=True)
+
 
